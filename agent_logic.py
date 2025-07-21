@@ -1,3 +1,8 @@
+# agent_logic.py
+# This file contains the core logic for the ProActive AI Assistant.
+# It manages conversation history, integrates with various tools (Google Calendar, Restaurant Search),
+# handles natural language understanding, and executes tasks based on user commands.
+
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
@@ -5,24 +10,29 @@ from datetime import datetime, timedelta
 import pytz
 import json
 import re
-import dateparser # Restoring for robust date parsing
+import dateparser
 
-# Load environment variables (ensure this is done before using os.getenv)
+# --- Initial Setup ---
+
+# Load environment variables from a .env file for secure configuration.
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
 
-# Configure Generative AI with your API key
+# Ensure the Google API key is set, as it's required for the generative AI model.
 if not GOOGLE_API_KEY:
     raise ValueError("GOOGLE_API_KEY not found in .env file or environment variables. Please set it.")
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# Import your tools
+# --- Tool Integration ---
+
+# Import custom tool modules.
 import tools.google_calendar as google_calendar
 import tools.restaurant_search as restaurant_search
 import tools.Google_Search as google_search_tool
-from prompts import SYSTEM_INSTRUCTION, TEAM_MEMBERS_INITIAL # Import system instruction and initial team members
+from prompts import SYSTEM_INSTRUCTION, TEAM_MEMBERS_INITIAL
 
-# Map of tool names (as expected by LLM - now unqualified names) to their actual function objects
+# Map tool names (as the LLM will call them) to their corresponding Python functions.
+# This provides a clean interface for the model to request tool execution.
 available_tools = {
     "check_calendar_availability": google_calendar.check_calendar_availability,
     "send_calendar_invite": google_calendar.send_calendar_invite,
@@ -30,34 +40,58 @@ available_tools = {
     "Google Search": google_search_tool.search,
 }
 
-# --- Conversation State Management ---
+# --- State Management ---
+# These global variables maintain the state of the conversation and cached results.
+
+# Stores the entire conversation history to provide context to the LLM.
 conversation_history = []
-# Cache to store available slots after a check_calendar_availability call
+# Caches available calendar slots to avoid redundant API calls.
 available_slots_cache = []
-# Cache to store found restaurants after a search_restaurants call
+# Caches restaurant search results.
 found_restaurants_cache = []
-# Store known team members, can be dynamically updated or extended
+# Maintains a dynamic list of team members' emails.
 current_team_members = list(TEAM_MEMBERS_INITIAL)
 
 # --- Helper Functions ---
 
-# Helper function to extract emails from text (used by main.py)
 def extract_emails(text: str) -> list:
-    # Simple regex to find email-like strings
-    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
-    return list(set(emails)) # Return unique emails
+    """
+    Extracts unique email addresses from a given text using a simple regex.
+    This is used by main.py to quickly identify and add new team members.
 
-# Helper function to update internal list of team members (used by main.py)
+    Args:
+        text: The input string to search for emails.
+
+    Returns:
+        A list of unique email addresses found in the text.
+    """
+    emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', text)
+    return list(set(emails))
+
 def update_team_members(new_emails: list):
+    """
+    Adds new email addresses to the global list of team members.
+
+    Args:
+        new_emails: A list of email addresses to add.
+    """
     global current_team_members
     for email in new_emails:
         if email not in current_team_members:
             current_team_members.append(email)
             print(f"(Internal) Added '{email}' to known team members list.")
 
-# Helper function to convert datetime objects within a structure to ISO strings
-# This is crucial for passing tool results back to the LLM.
 def convert_datetimes_to_iso(obj):
+    """
+    Recursively converts datetime objects within a data structure to ISO 8601 string format.
+    The Gemini API requires JSON-serializable data, and this ensures compatibility.
+
+    Args:
+        obj: The object (dict, list, datetime) to process.
+
+    Returns:
+        The processed object with datetimes converted to strings.
+    """
     if isinstance(obj, datetime):
         return obj.isoformat()
     elif isinstance(obj, list):
@@ -67,14 +101,26 @@ def convert_datetimes_to_iso(obj):
     else:
         return obj
 
-# NEW & IMPROVED HELPER FUNCTION: Resolve a natural language date/time string to a datetime object
 def resolve_datetime_from_string(date_time_str: str, current_context_date: datetime, timezone_name: str) -> datetime:
     """
-    Parses a natural language date/time string using dateparser, with a fallback for common patterns.
+    Parses a natural language date/time string into a timezone-aware datetime object.
+    It uses the `dateparser` library for flexibility and has a regex-based fallback
+    for common patterns like "next Tuesday at 5pm".
+
+    Args:
+        date_time_str: The natural language string to parse (e.g., "tomorrow", "next Friday at 3pm").
+        current_context_date: The current datetime, used as a reference for relative dates.
+        timezone_name: The target timezone (e.g., "America/New_York").
+
+    Returns:
+        A timezone-aware datetime object.
+
+    Raises:
+        ValueError: If the date/time string cannot be parsed.
     """
     tz = pytz.timezone(timezone_name)
 
-    # 1. Try dateparser first, as it's the most flexible.
+    # 1. Use dateparser for robust, flexible parsing.
     try:
         settings = {
             'RETURN_AS_TIMEZONE_AWARE': True,
@@ -83,14 +129,12 @@ def resolve_datetime_from_string(date_time_str: str, current_context_date: datet
         }
         parsed_dt = dateparser.parse(date_time_str, settings=settings)
         if parsed_dt:
-            # Ensure the final datetime is in the correct timezone, as dateparser can sometimes be inconsistent.
-            parsed_dt = parsed_dt.astimezone(tz)
-            print(f"(Internal) Successfully parsed '{date_time_str}' with dateparser to: {parsed_dt}")
-            return parsed_dt
+            # Ensure the final datetime is in the correct timezone.
+            return parsed_dt.astimezone(tz)
     except Exception as e:
         print(f"(Internal) dateparser failed with error: {e}. Trying regex fallback.")
 
-    # 2. Fallback to regex for "next [weekday] at [time]" patterns if dateparser fails.
+    # 2. Fallback for "next [weekday] at [time]" patterns.
     date_time_str_lower = date_time_str.lower().strip()
     match = re.search(r'next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+at\s+(\d{1,2})\s*(pm|am)?', date_time_str_lower)
     
@@ -122,14 +166,17 @@ def resolve_datetime_from_string(date_time_str: str, current_context_date: datet
     # 3. If all methods fail, raise a clear error.
     raise ValueError(f"Could not parse datetime: '{date_time_str}'. Please provide a clearer date/time (e.g., 'YYYY-MM-DD HH:MM').")
 
+def get_updated_system_instruction() -> str:
+    """
+    Dynamically generates the system instruction for the LLM.
+    This includes the current date/time, timezone, and the list of team members,
+    providing the model with up-to-date context for every turn.
 
-# Function to dynamically update system instruction with current info
-def get_updated_system_instruction():
-    # Ensure timezone is correctly imported and used
+    Returns:
+        A formatted string containing the full system instruction.
+    """
     current_datetime_aware = datetime.now(pytz.timezone(google_calendar.CALENDAR_TIMEZONE))
     formatted_datetime = current_datetime_aware.strftime("%Y-%m-%d %H:%M:%S %Z%z")
-
-    # Dynamically update the team members list for the LLM
     team_members_str = "\n".join([f"- {member}" for member in current_team_members])
 
     return SYSTEM_INSTRUCTION.format(
@@ -139,15 +186,25 @@ def get_updated_system_instruction():
     )
 
 # --- Main Agent Handler ---
-def handle_user_input(user_input: str):
-    global conversation_history, available_slots_cache, found_restaurants_cache, current_team_members
 
-    # Always start by updating the system instruction with current context
+def handle_user_input(user_input: str):
+    """
+    The main entry point for processing user input.
+    This function orchestrates the entire agent workflow:
+    1. Updates the system instruction with the latest context.
+    2. Sends the user query to the Gemini model.
+    3. Handles the model's response, which may include text or tool calls.
+    4. Executes tools, caches results, and sends results back to the model.
+    5. Prints the final text response to the user.
+    """
+    global conversation_history, available_slots_cache, found_restaurants_cache
+
+    # Always get the fresh system instruction with current context.
     updated_system_instruction = get_updated_system_instruction()
 
-    # Initialize the model for the current turn with dynamic system instruction and tools
+    # Initialize the Gemini model for this turn.
     model = genai.GenerativeModel(
-        model_name='gemini-1.5-flash', # Using the recommended working model
+        model_name='gemini-1.5-flash',
         tools=[
             google_calendar.check_calendar_availability,
             google_calendar.send_calendar_invite,
@@ -157,21 +214,19 @@ def handle_user_input(user_input: str):
         system_instruction=updated_system_instruction
     )
 
-    # Add user's new message to the history
+    # Append the user's message to the conversation history.
     conversation_history.append({"role": "user", "parts": [user_input]})
 
-    # Start a chat session with the updated history
+    # Start a chat session and send the message.
     chat = model.start_chat(history=conversation_history)
-    response = chat.send_message(user_input) # Send user input for current turn
+    response = chat.send_message(user_input)
 
-    # --- THIS IS THE CRITICAL FIX FOR CONVERSATION MEMORY ---
-    # The model's response, which might contain tool calls, must be added to our history log.
-    # If we don't do this, the next turn will have a broken history.
+    # IMPORTANT: The model's response (including any tool calls) must be added
+    # back to our history to maintain a coherent conversation record.
     if response.candidates and response.candidates[0].content.parts:
         conversation_history.append(response.candidates[0].content)
-    # --- END CRITICAL FIX ---
 
-    # --- ENHANCED DEBUG PRINT STATEMENT (VERBOSE) ---
+    # Verbose debug printing to inspect the raw model output.
     print("\n--- RAW GEMINI RESPONSE CONTENT (VERBOSE) ---")
     if response.candidates:
         if response.candidates[0].content.parts:
@@ -189,28 +244,25 @@ def handle_user_input(user_input: str):
         print("  No candidates in response.")
     print(f"Full Raw Response Object (for deeper inspection): {response}") # Print the entire response object
     print("--- END RAW GEMINI RESPONSE CONTENT (VERBOSE) ---")
-    # --- END DEBUG PRINT STATEMENT ---
 
-
-    # Process the model's response (which can be text, tool calls, or both)
-    while True: # Loop to handle multi-turn tool use (model calls tool, gets result, responds)
+    # Loop to handle potential multi-step tool interactions.
+    while True:
         if response.candidates and response.candidates[0].content.parts:
-            # Separate parts into tool calls and text responses
             tool_call_parts = [part.function_call for part in response.candidates[0].content.parts if part.function_call]
             text_response_parts = [part.text for part in response.candidates[0].content.parts if part.text]
 
             if tool_call_parts:
-                # If the model wants to call one or more tools, execute them and collect responses.
+                # The model has requested to use a tool.
                 tool_responses = []
                 for function_call in tool_call_parts:
                     function_name = function_call.name
-                    function_args = {k: v for k, v in function_call.args.items()} # Convert to regular dict
+                    function_args = dict(function_call.args)
 
                     print(f"\n--- Model requesting Tool Call: {function_name} with args: {function_args} ---")
 
                     if function_name in available_tools:
                         try:
-                            # --- Dynamic Argument Handling (for datetime string resolution) ---
+                            # Pre-process arguments, especially for resolving datetime strings.
                             if function_name in ["check_calendar_availability", "send_calendar_invite"]:
                                 current_dt_for_context = datetime.now(pytz.timezone(google_calendar.CALENDAR_TIMEZONE))
                                 
@@ -242,56 +294,52 @@ def handle_user_input(user_input: str):
                                 if 'slot_duration_minutes' in function_args and isinstance(function_args['slot_duration_minutes'], float):
                                     function_args['slot_duration_minutes'] = int(function_args['slot_duration_minutes'])
 
-                            # Execute the tool function
+                            # Execute the requested tool function.
                             tool_result = available_tools[function_name](**function_args)
                             print(f"--- Tool Call Successful. Result: {tool_result} ---")
 
-                            # Cache results if needed
+                            # Cache results for future reference in the conversation.
                             if function_name == "check_calendar_availability":
                                 available_slots_cache = tool_result
                             elif function_name == "search_restaurants":
                                 found_restaurants_cache = tool_result
 
-                            # Prepare successful tool response for the model.
-                            # The 'response' field for the Gemini API must be a dict. We wrap list results here.
+                            # Prepare the tool's result to be sent back to the model.
                             processed_tool_result = convert_datetimes_to_iso(tool_result)
                             response_payload = {"result": processed_tool_result}
                             tool_responses.append({"function_response": {"name": function_name, "response": response_payload}})
 
                         except Exception as e:
+                            # Handle errors during tool execution gracefully.
                             error_msg = f"Error executing tool {function_name}: {e}"
                             print(error_msg)
-                            # For errors, return a dictionary containing the error message.
-                            # This prevents the AttributeError crash.
                             tool_responses.append({"function_response": {"name": function_name, "response": {"error": error_msg}}})
                     else:
+                        # Handle cases where the model hallucinates a non-existent tool.
                         error_msg = f"Tool '{function_name}' not found."
                         print(error_msg)
                         tool_responses.append({"function_response": {"name": function_name, "response": {"error": error_msg}}})
 
-                # --- THIS IS THE CRITICAL FIX ---
-                # Add all tool responses to conversation history for our record
+                # Add the tool responses to our history log.
                 history_entry = {"role": "tool", "parts": tool_responses}
                 conversation_history.append(history_entry)
 
-                # After executing tools, send the *parts* of the new history entry back to the model for a new response
+                # Send the tool results back to the model to get the next response.
                 response = chat.send_message(history_entry['parts'])
 
-
             elif text_response_parts:
-                # If the model has a text response, combine and print it
+                # The model has generated a simple text response.
                 full_text_response = " ".join(text_response_parts)
                 print(f"\nAssistant: {full_text_response}")
                 conversation_history.append({"role": "model", "parts": [full_text_response]})
-                break # Exit loop after getting a text response
+                break  # Exit the loop as we have a final answer for this turn.
 
             else:
-                # Fallback if no specific parts (tool calls or text) are identified
-                print("\nAssistant: I processed your request but didn't generate a specific response. Is there anything else I can help with?")
-                conversation_history.append({"role": "model", "parts": ["I processed your request but didn't generate a specific response. Is there anything else I can help with?"]})
-                break # Exit loop
+                # Fallback for unexpected response structures.
+                print("\nAssistant: I processed the request but have no specific response.")
+                break
 
         else:
-            print("\nAssistant: I'm not sure how to respond to that. Can you please rephrase or provide more details?")
-            conversation_history.append({"role": "model", "parts": ["I'm not sure how to respond to that. Can you please rephrase or provide more details?"]})
-            break # Exit loop
+            # Fallback if the model provides no response candidates.
+            print("\nAssistant: I'm not sure how to respond to that.")
+            break

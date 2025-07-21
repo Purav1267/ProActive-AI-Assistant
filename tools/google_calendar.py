@@ -1,3 +1,8 @@
+# tools/google_calendar.py
+# This module provides an interface to interact with the Google Calendar API.
+# It includes functions for authenticating the user, checking for available time slots
+# across multiple calendars, and sending calendar invitations.
+
 import os
 import pytz
 import dateparser
@@ -9,23 +14,33 @@ from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
-# If modifying these scopes, delete the file token.json.
+# --- Configuration ---
+
+# SCOPES define the level of access requested from the user's Google account.
+# If these are changed, the user's token.json must be deleted to re-authenticate.
 SCOPES = ['https://www.googleapis.com/auth/calendar'] 
 
-# Set your desired timezone for all calendar operations
+# A fixed timezone is used for all date/time operations to ensure consistency.
 CALENDAR_TIMEZONE = 'Asia/Kolkata' 
 
-calendar_service = None # Keep this global variable definition
+# Global variable to hold the calendar service object after authentication.
+calendar_service = None
+
+# --- Authentication ---
 
 def get_calendar_service():
     """
-    Authenticates with the Google Calendar API.
-    Handles OAuth 2.0 flow, prompts user for authorization if necessary,
-    and saves/loads credentials from 'token.json'.
-    Returns the authenticated Google Calendar API service object.
+    Authenticates with the Google Calendar API using the OAuth 2.0 protocol.
+    - It first tries to load existing credentials from `token.json`.
+    - If credentials are not found, are invalid, or have expired, it initiates
+      the OAuth flow using `cred1.json` (the client secrets file).
+    - The user will be prompted to authorize access in their browser.
+    - New credentials (or refreshed ones) are saved back to `token.json`.
+    
+    Returns:
+        An authorized Google Calendar API service object, or None if authentication fails.
     """
-    global calendar_service # Declare that we're modifying the global variable
-
+    global calendar_service
     creds = None
     if os.path.exists('token.json'):
         creds = Credentials.from_authorized_user_file('token.json', SCOPES)
@@ -34,13 +49,10 @@ def get_calendar_service():
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
         else:
-            # --- IMPORTANT CHANGE HERE ---
-            # Now it looks for 'cred.json' instead of 'credentials.json'
-            if not os.path.exists('cred1.json'): # Check for 'cred.json'
-                print("Error: 'cred.json' not found. Please ensure it's in your project root.")
+            if not os.path.exists('cred1.json'):
+                print("Error: 'cred1.json' not found. This file is required for authentication.")
                 return None
-            flow = InstalledAppFlow.from_client_secrets_file('cred1.json', SCOPES) # Use 'cred.json'
-            # --- END IMPORTANT CHANGE ---
+            flow = InstalledAppFlow.from_client_secrets_file('cred1.json', SCOPES)
             creds = flow.run_local_server(port=0)
         
         with open('token.json', 'w') as token:
@@ -52,26 +64,44 @@ def get_calendar_service():
         return service
     except HttpError as error:
         print(f'An HTTP error occurred during calendar service initialization: {error}')
-        print("Please check your network connection, API key, and Google Cloud project setup.")
         return None
     except Exception as e:
         print(f"An unexpected error occurred during calendar service initialization: {e}")
         return None
 
-# Ensure the calendar service is initialized when the module is loaded
+# Initialize the service when the module is first imported.
 calendar_service = get_calendar_service()
 
 
+# --- Core Tool Functions ---
+
 def check_calendar_availability(team_members_emails: list, search_start_dt: datetime, search_end_dt: datetime,
-                                slot_duration_minutes=120):
+                                slot_duration_minutes: int = 120) -> list:
     """
-    Checks common free slots for a list of team members within a given time range.
-    This is a simplified and more robust implementation.
+    Finds common free time slots for a group of people.
+    1. It queries the `freebusy` endpoint of the Google Calendar API to get all busy
+       intervals for the specified calendars.
+    2. It merges all busy intervals into a single timeline.
+    3. It then iterates through the desired time window (from `search_start_dt` to 
+       `search_end_dt`) in 30-minute increments, checking for slots of the
+       specified `slot_duration_minutes` that do not overlap with any busy time.
+    
+    Args:
+        team_members_emails: A list of emails to check. 'primary' is added automatically.
+        search_start_dt: The start of the time window to search within (timezone-aware).
+        search_end_dt: The end of the time window to search within (timezone-aware).
+        slot_duration_minutes: The desired length of the free slot in minutes.
+
+    Returns:
+        A list of up to 3 available slots. Each slot is a dictionary containing a
+        user-friendly display string and the start/end datetime objects. Returns an
+        empty list on error or if no slots are found.
     """
     if not calendar_service:
         print("Calendar service not available. Cannot check availability.")
         return []
 
+    # Prepare the request body for the freebusy API call.
     items = [{'id': email} for email in team_members_emails]
     if 'primary' not in [item['id'] for item in items]:
         items.append({'id': 'primary'})
@@ -84,10 +114,12 @@ def check_calendar_availability(team_members_emails: list, search_start_dt: date
     }
 
     try:
+        # Execute the freebusy query.
         response = calendar_service.freebusy().query(body=body).execute()
         
+        # Collect and merge all busy intervals from all specified calendars.
         all_busy_intervals = []
-        for calendar_id, data in response['calendars'].items():
+        for data in response['calendars'].values():
             for busy_slot in data.get('busy', []):
                 start = dateparser.parse(busy_slot['start']).astimezone(pytz.timezone(CALENDAR_TIMEZONE))
                 end = dateparser.parse(busy_slot['end']).astimezone(pytz.timezone(CALENDAR_TIMEZONE))
@@ -122,8 +154,9 @@ def check_calendar_availability(team_members_emails: list, search_start_dt: date
             
             potential_slot_start += timedelta(minutes=30)
 
+        # Format the found slots for the LLM.
         formatted_and_raw_slots = []
-        for start_dt, end_dt in common_free_slots[:3]:
+        for start_dt, end_dt in common_free_slots[:3]: # Limit to top 3 results
             formatted_and_raw_slots.append({
                 "display": f"{start_dt.strftime('%A, %B %d, %I:%M %p')} - {end_dt.strftime('%I:%M %p')}",
                 "start_datetime": start_dt,
@@ -140,111 +173,96 @@ def check_calendar_availability(team_members_emails: list, search_start_dt: date
         return []
 
 
-def send_calendar_invite(restaurant_name: str, address: str, slot_datetime_start: datetime, # Use datetime (class) directly
-                         slot_datetime_end: datetime, attendees_emails: list, description: str = None): # Use datetime (class) directly
+def send_calendar_invite(restaurant_name: str, address: str, slot_datetime_start: datetime,
+                         slot_datetime_end: datetime, attendees_emails: list, description: str = None) -> bool:
     """
-    Creates and sends a Google Calendar invitation.
+    Creates and sends a Google Calendar invitation to a list of attendees.
+
     Args:
-        restaurant_name (str): The name of the restaurant.
-        address (str): The address of the restaurant.
-        slot_datetime_start (datetime): The start datetime of the event (timezone-aware).
-        slot_datetime_end (datetime): The end datetime of the event (timezone-aware).
-        attendees_emails (list): A list of email addresses of attendees.
-        description (str, optional): A description for the event. Defaults to None.
+        restaurant_name: The name of the restaurant for the event summary.
+        address: The location of the event.
+        slot_datetime_start: The start datetime of the event (timezone-aware).
+        slot_datetime_end: The end datetime of the event (timezone-aware).
+        attendees_emails: A list of email addresses for the attendees.
+        description: An optional description for the event body.
+
     Returns:
-        bool: True if the event was created successfully, False otherwise.
+        True if the event was created successfully, False otherwise.
     """
     if not calendar_service:
         print("Calendar service not available. Cannot send invite.")
         return False
 
-    event_summary = f'Team Dinner at {restaurant_name}'
-    event_description = description if description else 'A celebratory team dinner arranged by AI Assistant!'
-
-    # --- CRITICAL CHANGE FOR TESTING ATTENDEES ---
-    # For this critical test, we will explicitly set the only attendee as the primary calendar.
-    # This bypasses any potential issues with other email addresses.
-    attendees_list_for_api = [{'email': email} for email in attendees_emails] 
-    # The 'sendUpdates=all' is what sends the actual email. Let's keep it.
-    # --- END CRITICAL CHANGE ---
-
+    # Construct the event body for the API call.
     event = {
-        'summary': event_summary,
+        'summary': f'Team Dinner at {restaurant_name}',
         'location': address,
-        'description': event_description,
-        'start': {
-            'dateTime': slot_datetime_start.isoformat(),
-            'timeZone': CALENDAR_TIMEZONE,
-        },
-        'end': {
-            'dateTime': slot_datetime_end.isoformat(),
-            'timeZone': CALENDAR_TIMEZONE,
-        },
-        'attendees': attendees_list_for_api, # Use our simplified list here
+        'description': description or 'A celebratory team dinner arranged by your AI Assistant!',
+        'start': {'dateTime': slot_datetime_start.isoformat(), 'timeZone': CALENDAR_TIMEZONE},
+        'end': {'dateTime': slot_datetime_end.isoformat(), 'timeZone': CALENDAR_TIMEZONE},
+        'attendees': [{'email': email} for email in attendees_emails],
         'reminders': {
             'useDefault': False,
             'overrides': [
-                {'method': 'email', 'minutes': 24 * 60}, # Email reminder 24 hours before
-                {'method': 'popup', 'minutes': 10},     # Popup reminder 10 minutes before
+                {'method': 'email', 'minutes': 24 * 60},
+                {'method': 'popup', 'minutes': 10},
             ],
         },
     }
 
     try:
-        # 'calendarId': 'primary' refers to the default calendar of the authenticated user.
-        # 'sendUpdates': 'all' sends notifications to attendees.
-        event = calendar_service.events().insert(calendarId='primary', body=event, sendUpdates='all').execute()
-        print(f'Event created: {event.get("htmlLink")}')
+        # Insert the event into the primary calendar of the authenticated user.
+        # `sendUpdates='all'` ensures that email invitations are sent to attendees.
+        created_event = calendar_service.events().insert(
+            calendarId='primary', body=event, sendUpdates='all'
+        ).execute()
+        print(f'Event created successfully: {created_event.get("htmlLink")}')
         return True
     except HttpError as error:
         print(f'An HTTP error occurred during event creation: {error}')
-        print("Please ensure attendees' emails are valid and your calendar permissions are correct.")
         return False
     except Exception as e:
         print(f"An unexpected error occurred in send_calendar_invite: {e}")
         return False
 
-# --- Example Usage (for testing this module independently) ---
+# --- Standalone Test Block ---
+
 if __name__ == '__main__':
+    # This block allows for testing the module's functions independently from the main agent.
+    # It demonstrates how to call the functions and can be used for debugging.
     print("--- Running Google Calendar Tool Test ---")
     
     if not calendar_service:
-        print("Calendar service did not initialize. Please check credentials.json and network.")
+        print("Calendar service did not initialize. Check credentials and permissions.")
     else:
-        # Use the primary authenticated email for testing, as a confirmed valid email.
-        # This is crucial to get past the "Invalid attendee email" error.
-        test_team_emails = ["puravmalikcse@gmail.com"] 
-        # Once this works, you can try adding puravmalikcse@gmail.com and puravmalikcse2@gmail.com back,
-        # but the error might reappear if Google's API still deems them invalid for invite.
-
-        now = datetime.now(pytz.timezone(CALENDAR_TIMEZONE)) 
+        # Example: Check availability for a test user for the upcoming week.
+        test_team_emails = ["puravmalikcse@gmail.com"]
+        now = datetime.now(pytz.timezone(CALENDAR_TIMEZONE))
         
-        # Calculate next Monday
-        days_until_monday = (0 - now.weekday() + 7) % 7 # 0 is Monday
+        days_until_monday = (0 - now.weekday() + 7) % 7
         next_monday = now + timedelta(days=days_until_monday)
         
-        test_search_start = next_monday.replace(hour=17, minute=0, second=0, microsecond=0) # Monday 5 PM
-        test_search_end = next_monday.replace(hour=22, minute=0, second=0, microsecond=0) + timedelta(days=4) # Friday 10 PM same week
+        test_search_start = next_monday.replace(hour=17, minute=0, second=0)
+        test_search_end = test_search_start + timedelta(days=4, hours=5)
 
         print(f"\nChecking availability for {test_team_emails} from {test_search_start.isoformat()} to {test_search_end.isoformat()}")
         available_slots = check_calendar_availability(test_team_emails, test_search_start, test_search_end)
 
         if available_slots:
-            print("\nAvailable common slots:")
+            print("\nFound available slots:")
             for slot in available_slots:
                 print(f"- {slot['display']}")
             
-            confirm_send = input("\nSend a test invite for the first available slot? (yes/no): ").lower()
-            if confirm_send == 'yes':
+            # Example: Send a test invite for the first found slot.
+            if input("\nSend a test invite for the first slot? (yes/no): ").lower() == 'yes':
                 first_slot = available_slots[0]
                 send_calendar_invite(
-                    "Test Restaurant", 
-                    "123 Test St, Hyderabad", 
+                    "Test Cafe", 
+                    "456 Test Ave, Hyderabad", 
                     first_slot['start_datetime'], 
                     first_slot['end_datetime'], 
-                    test_team_emails, # This list is currently ignored by send_calendar_invite with the new change
-                    "This is a test invite from your AI Assistant. Please ignore."
+                    test_team_emails,
+                    "This is a test event created for debugging purposes."
                 )
         else:
-            print("\nNo common available slots found for the test team within the specified time.")
-            print("Please ensure your account (puravmalik24@gmail.com) has free time in its calendar for next week's evenings.")
+            print("\nNo common available slots were found in the test window.")
