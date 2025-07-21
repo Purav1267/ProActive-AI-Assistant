@@ -89,7 +89,7 @@ Welcome to the **Proactive AI Assistant**, a smart virtual agent that automates 
 
 ```bash
 git clone https://github.com/your-username/proactive-assistant.git
-cd "ProActive Assistant 2"
+cd "ProActive-AI-Assistant"
 ```
 
 ---
