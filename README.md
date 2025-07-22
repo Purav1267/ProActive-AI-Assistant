@@ -127,6 +127,29 @@ pip install -r requirements.txt
 ---
 
 ## 4. Running the Assistant
+You have two ways to run the assistant: via the Command Line Interface (CLI) or via the Streamlit web application.
+
+
+A. **Running via Command Line Interface (CLI)**
+1. Ensure your virtual environment is active.
+
+2. Launch the main CLI application:
+
+```Bash
+
+python main.py
+```
+
+B. **Running via Streamlit Web Application (Local Host)**
+1. Ensure your virtual environment is active.
+
+2. Launch the Streamlit application:
+
+```Bash
+
+streamlit run app.py
+```
+This command will open a new tab in your web browser (usually at `http://localhost:8501`) displaying the chat interface.
  1. Ensure your virtual environment is active.
  2. Launch the main application:
 ```bash

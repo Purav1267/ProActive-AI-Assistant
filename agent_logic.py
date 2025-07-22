@@ -10,7 +10,7 @@ from datetime import datetime, timedelta
 import pytz
 import json
 import re
-import dateparser
+import dateparser # Ensure dateparser is installed (pip install dateparser)
 
 # --- Initial Setup ---
 
@@ -28,7 +28,7 @@ genai.configure(api_key=GOOGLE_API_KEY)
 # Import custom tool modules.
 import tools.google_calendar as google_calendar
 import tools.restaurant_search as restaurant_search
-import tools.Google_Search as google_search_tool
+import tools.Google_Search as google_search_tool # Corrected alias
 from prompts import SYSTEM_INSTRUCTION, TEAM_MEMBERS_INITIAL
 
 # Map tool names (as the LLM will call them) to their corresponding Python functions.
@@ -37,14 +37,15 @@ available_tools = {
     "check_calendar_availability": google_calendar.check_calendar_availability,
     "send_calendar_invite": google_calendar.send_calendar_invite,
     "search_restaurants": restaurant_search.search_restaurants,
-    "Google Search": google_search_tool.search,
+    "google_search": google_search_tool.search, # Corrected usage of the alias
 }
 
 # --- State Management ---
 # These global variables maintain the state of the conversation and cached results.
 
 # Stores the entire conversation history to provide context to the LLM.
-conversation_history = []
+# It should be a list of dictionaries, each representing a turn.
+conversation_history = [] 
 # Caches available calendar slots to avoid redundant API calls.
 available_slots_cache = []
 # Caches restaurant search results.
@@ -79,7 +80,7 @@ def update_team_members(new_emails: list):
     for email in new_emails:
         if email not in current_team_members:
             current_team_members.append(email)
-            print(f"(Internal) Added '{email}' to known team members list.")
+            # Removed print statement: (Internal) Added '{email}' to known team members list.
 
 def convert_datetimes_to_iso(obj):
     """
@@ -110,7 +111,7 @@ def resolve_datetime_from_string(date_time_str: str, current_context_date: datet
     Args:
         date_time_str: The natural language string to parse (e.g., "tomorrow", "next Friday at 3pm").
         current_context_date: The current datetime, used as a reference for relative dates.
-        timezone_name: The target timezone (e.g., "America/New_York").
+        timezone_name: The target timezone (e.g., "Asia/Kolkata").
 
     Returns:
         A timezone-aware datetime object.
@@ -121,20 +122,21 @@ def resolve_datetime_from_string(date_time_str: str, current_context_date: datet
     tz = pytz.timezone(timezone_name)
 
     # 1. Use dateparser for robust, flexible parsing.
-    try:
-        settings = {
-            'RETURN_AS_TIMEZONE_AWARE': True,
-            'RELATIVE_BASE': current_context_date,
-            'TO_TIMEZONE': timezone_name
-        }
-        parsed_dt = dateparser.parse(date_time_str, settings=settings)
-        if parsed_dt:
-            # Ensure the final datetime is in the correct timezone.
-            return parsed_dt.astimezone(tz)
-    except Exception as e:
-        print(f"(Internal) dateparser failed with error: {e}. Trying regex fallback.")
+    settings = {
+        'RETURN_AS_TIMEZONE_AWARE': True,
+        'RELATIVE_BASE': current_context_date,
+        'TO_TIMEZONE': timezone_name,
+        'DATE_ORDER': 'YMD', # Or MDY depending on your preferred default
+        'PREFER_DATES_FROM': 'future' # Prefer dates in the future
+    }
+    
+    parsed_dt = dateparser.parse(date_time_str, settings=settings)
 
-    # 2. Fallback for "next [weekday] at [time]" patterns.
+    if parsed_dt:
+        # Ensure the final datetime is in the correct timezone.
+        return parsed_dt.astimezone(tz)
+
+    # 2. Fallback for common patterns if dateparser returns None.
     date_time_str_lower = date_time_str.lower().strip()
     match = re.search(r'next\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\s+at\s+(\d{1,2})\s*(pm|am)?', date_time_str_lower)
     
@@ -160,7 +162,6 @@ def resolve_datetime_from_string(date_time_str: str, current_context_date: datet
             hour = 0
         
         resolved_dt = tz.localize(datetime(target_date.year, target_date.month, target_date.day, hour, 0, 0))
-        print(f"(Internal FALLBACK) Parsed '{date_time_str}' to {resolved_dt}")
         return resolved_dt
 
     # 3. If all methods fail, raise a clear error.
@@ -187,7 +188,7 @@ def get_updated_system_instruction() -> str:
 
 # --- Main Agent Handler ---
 
-def handle_user_input(user_input: str):
+def handle_user_input(user_input: str) -> str: # Added return type hint
     """
     The main entry point for processing user input.
     This function orchestrates the entire agent workflow:
@@ -195,7 +196,7 @@ def handle_user_input(user_input: str):
     2. Sends the user query to the Gemini model.
     3. Handles the model's response, which may include text or tool calls.
     4. Executes tools, caches results, and sends results back to the model.
-    5. Prints the final text response to the user.
+    5. Returns the final text response to the user.
     """
     global conversation_history, available_slots_cache, found_restaurants_cache
 
@@ -214,36 +215,29 @@ def handle_user_input(user_input: str):
         system_instruction=updated_system_instruction
     )
 
-    # Append the user's message to the conversation history.
-    conversation_history.append({"role": "user", "parts": [user_input]})
+    # The first message to the chat session should be the user's input for the current turn.
+    # The `history` parameter in `start_chat` handles the preceding conversation.
+    # We DO NOT append user_input to conversation_history here before `start_chat`
+    # if `send_message` is going to send `user_input` directly.
+    # Instead, `start_chat` gets the full history *up to the previous turn*,
+    # and `send_message` sends the *current* user input.
 
-    # Start a chat session and send the message.
+    # Start a chat session with the conversation history up to the previous turn.
     chat = model.start_chat(history=conversation_history)
+    
+    # Send the current user input as the new message in the chat.
     response = chat.send_message(user_input)
 
-    # IMPORTANT: The model's response (including any tool calls) must be added
-    # back to our history to maintain a coherent conversation record.
+    # After the model responds to the user's input, add the user's turn to history
+    # This is crucial for the next turn's context.
+    conversation_history.append({"role": "user", "parts": [user_input]})
+    
+    # And add the model's response to history
     if response.candidates and response.candidates[0].content.parts:
         conversation_history.append(response.candidates[0].content)
 
-    # Verbose debug printing to inspect the raw model output.
-    print("\n--- RAW GEMINI RESPONSE CONTENT (VERBOSE) ---")
-    if response.candidates:
-        if response.candidates[0].content.parts:
-            for i, part in enumerate(response.candidates[0].content.parts):
-                print(f"Part {i+1} Type: {type(part)}")
-                if part.function_call:
-                    print(f"  FUNCTION CALL ATTEMPTED: {part.function_call.name}({part.function_call.args})")
-                elif part.text:
-                    print(f"  TEXT RESPONSE: {part.text}")
-                else:
-                    print(f"  UNEXPECTED PART CONTENT (type {type(part.value)}): {part}")
-        else:
-            print("  Response candidate content.parts is empty.")
-    else:
-        print("  No candidates in response.")
-    print(f"Full Raw Response Object (for deeper inspection): {response}") # Print the entire response object
-    print("--- END RAW GEMINI RESPONSE CONTENT (VERBOSE) ---")
+
+    final_assistant_response_text = "" # Initialize variable to store the final text response
 
     # Loop to handle potential multi-step tool interactions.
     while True:
@@ -252,13 +246,10 @@ def handle_user_input(user_input: str):
             text_response_parts = [part.text for part in response.candidates[0].content.parts if part.text]
 
             if tool_call_parts:
-                # The model has requested to use a tool.
-                tool_responses = []
+                tool_responses_for_history = [] # Collect all tool responses for this turn
                 for function_call in tool_call_parts:
                     function_name = function_call.name
                     function_args = dict(function_call.args)
-
-                    print(f"\n--- Model requesting Tool Call: {function_name} with args: {function_args} ---")
 
                     if function_name in available_tools:
                         try:
@@ -266,8 +257,6 @@ def handle_user_input(user_input: str):
                             if function_name in ["check_calendar_availability", "send_calendar_invite"]:
                                 current_dt_for_context = datetime.now(pytz.timezone(google_calendar.CALENDAR_TIMEZONE))
                                 
-                                # Keys that might contain datetime strings. This makes the logic robust
-                                # against the LLM using either 'search_start_dt' or 'search_start_dt_str'.
                                 dt_string_keys = {
                                     'search_start_dt_str': 'search_start_dt',
                                     'search_end_dt_str': 'search_end_dt',
@@ -276,7 +265,6 @@ def handle_user_input(user_input: str):
                                 }
 
                                 for key_str, key_dt in dt_string_keys.items():
-                                    # Handle cases where LLM uses either key_str or key_dt with a string value
                                     datetime_string = None
                                     if key_str in function_args:
                                         datetime_string = function_args.pop(key_str)
@@ -290,56 +278,50 @@ def handle_user_input(user_input: str):
                                             google_calendar.CALENDAR_TIMEZONE
                                         )
 
-                                # Ensure slot_duration_minutes is an int (from float if LLM outputs float)
                                 if 'slot_duration_minutes' in function_args and isinstance(function_args['slot_duration_minutes'], float):
                                     function_args['slot_duration_minutes'] = int(function_args['slot_duration_minutes'])
 
-                            # Execute the requested tool function.
                             tool_result = available_tools[function_name](**function_args)
-                            print(f"--- Tool Call Successful. Result: {tool_result} ---")
 
-                            # Cache results for future reference in the conversation.
                             if function_name == "check_calendar_availability":
-                                available_slots_cache = tool_result
+                                available_slots_cache[:] = tool_result # Use slice assignment to update global list in place
                             elif function_name == "search_restaurants":
-                                found_restaurants_cache = tool_result
+                                found_restaurants_cache[:] = tool_result # Use slice assignment to update global list in place
 
                             # Prepare the tool's result to be sent back to the model.
+                            # Ensure the response is always a dictionary, even if the tool_result is a list.
                             processed_tool_result = convert_datetimes_to_iso(tool_result)
-                            response_payload = {"result": processed_tool_result}
-                            tool_responses.append({"function_response": {"name": function_name, "response": response_payload}})
+                            # Wrap the processed_tool_result in a dictionary
+                            response_payload = {"output": processed_tool_result}
+                            tool_responses_for_history.append({"function_response": {"name": function_name, "response": response_payload}})
 
                         except Exception as e:
-                            # Handle errors during tool execution gracefully.
                             error_msg = f"Error executing tool {function_name}: {e}"
-                            print(error_msg)
-                            tool_responses.append({"function_response": {"name": function_name, "response": {"error": error_msg}}})
+                            response_payload = {"error_message": error_msg} # Wrap error in a dict
+                            tool_responses_for_history.append({"function_response": {"name": function_name, "response": response_payload}})
                     else:
-                        # Handle cases where the model hallucinates a non-existent tool.
                         error_msg = f"Tool '{function_name}' not found."
-                        print(error_msg)
-                        tool_responses.append({"function_response": {"name": function_name, "response": {"error": error_msg}}})
+                        response_payload = {"error_message": error_msg} # Wrap error in a dict
+                        tool_responses_for_history.append({"function_response": {"name": function_name, "response": response_payload}})
 
-                # Add the tool responses to our history log.
-                history_entry = {"role": "tool", "parts": tool_responses}
+                # Add all tool responses for this turn to conversation history.
+                history_entry = {"role": "tool", "parts": tool_responses_for_history}
                 conversation_history.append(history_entry)
 
                 # Send the tool results back to the model to get the next response.
                 response = chat.send_message(history_entry['parts'])
 
             elif text_response_parts:
-                # The model has generated a simple text response.
-                full_text_response = " ".join(text_response_parts)
-                print(f"\nAssistant: {full_text_response}")
-                conversation_history.append({"role": "model", "parts": [full_text_response]})
-                break  # Exit the loop as we have a final answer for this turn.
+                final_assistant_response_text = " ".join(text_response_parts)
+                conversation_history.append({"role": "model", "parts": [final_assistant_response_text]})
+                return final_assistant_response_text # Return the text response
 
             else:
-                # Fallback for unexpected response structures.
-                print("\nAssistant: I processed the request but have no specific response.")
-                break
+                final_assistant_response_text = "I processed the request but have no specific response. Is there anything else I can help with?"
+                conversation_history.append({"role": "model", "parts": [final_assistant_response_text]})
+                return final_assistant_response_text
 
         else:
-            # Fallback if the model provides no response candidates.
-            print("\nAssistant: I'm not sure how to respond to that.")
-            break
+            final_assistant_response_text = "I'm not sure how to respond to that. Can you please rephrase or provide more details?"
+            conversation_history.append({"role": "model", "parts": [final_assistant_response_text]})
+            return final_assistant_response_text
