@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from google.auth.exceptions import RefreshError
 
 # --- Configuration ---
 
@@ -47,13 +48,36 @@ def get_calendar_service():
     
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                print(f"Token refresh failed with invalid_grant or similar: {e}. Deleting 'token.json' and re-authenticating...")
+                try:
+                    os.remove('token.json')
+                except FileNotFoundError:
+                    pass
+                if not os.path.exists('cred1.json'):
+                    print("Error: 'cred1.json' not found. This file is required for authentication.")
+                    return None
+                flow = InstalledAppFlow.from_client_secrets_file('cred1.json', SCOPES)
+                creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
+            except Exception as e:
+                print(f"Unexpected error during token refresh: {e}. Deleting 'token.json' and re-authenticating...")
+                try:
+                    os.remove('token.json')
+                except FileNotFoundError:
+                    pass
+                if not os.path.exists('cred1.json'):
+                    print("Error: 'cred1.json' not found. This file is required for authentication.")
+                    return None
+                flow = InstalledAppFlow.from_client_secrets_file('cred1.json', SCOPES)
+                creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
         else:
             if not os.path.exists('cred1.json'):
                 print("Error: 'cred1.json' not found. This file is required for authentication.")
                 return None
             flow = InstalledAppFlow.from_client_secrets_file('cred1.json', SCOPES)
-            creds = flow.run_local_server(port=0)
+            creds = flow.run_local_server(port=0, access_type='offline', prompt='consent')
         
         with open('token.json', 'w') as token:
             token.write(creds.to_json())
@@ -69,8 +93,8 @@ def get_calendar_service():
         print(f"An unexpected error occurred during calendar service initialization: {e}")
         return None
 
-# Initialize the service when the module is first imported.
-calendar_service = get_calendar_service()
+# Do not initialize the service at import time to avoid auth prompts/crashes on import.
+# The host application (e.g., Streamlit app) should call get_calendar_service() explicitly.
 
 
 # --- Core Tool Functions ---

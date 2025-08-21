@@ -36,7 +36,7 @@ if not st.session_state.calendar_service_initialized:
         st.session_state.calendar_service_initialized = True
         st.success("Google Calendar service initialized successfully!")
     else:
-        st.error("Failed to initialize Google Calendar service. Please check your cred.json and network connection. Restart the app after fixing.")
+        st.error("Failed to initialize Google Calendar service. Please check your cred1.json and network connection. Restart the app after fixing.")
         st.stop()
 
 # --- Streamlit UI Setup ---

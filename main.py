@@ -1,6 +1,7 @@
 import google.generativeai as genai
 import os
 from dotenv import load_dotenv
+import tools.google_calendar as google_calendar
 
 # Load environment variables
 load_dotenv()
@@ -21,6 +22,13 @@ import agent_logic # Import the module to access its current_team_members list
 def main():
     print("AI Assistant is ready! Type 'exit' to quit.")
     print("Initial team members: " + ", ".join(agent_logic.current_team_members)) # Display initial team members
+
+    # Initialize Google Calendar service for CLI usage
+    if not google_calendar.calendar_service:
+        print("Initializing Google Calendar service for CLI...")
+        google_calendar.calendar_service = google_calendar.get_calendar_service()
+        if not google_calendar.calendar_service:
+            print("Warning: Google Calendar service not initialized. Calendar features will be unavailable.")
 
     while True:
         user_query = input("\nYou: ")
