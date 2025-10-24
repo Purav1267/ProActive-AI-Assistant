@@ -37,6 +37,17 @@ Our AI Assistant isn't just a chatbot; it's a proactive agent that can:
     * Offers **curated suggestions** (e.g., "Would you like me to book a table at X restaurant on Y date?").
     * Provides **clear confirmations** once actions are completed.
 
+## 🎥 Demo Video
+
+Experience the **Proactive AI Assistant: Team Dinner Planner** in action! 🍽️
+
+👉 [**Watch the Demo Video on Google Drive**](https://drive.google.com/file/d/1DI7F2jMXTEPKqLt_bwmnXVOtEp2nP13N/view?usp=sharing)
+
+> 🎬 The demo video walks through how the AI Assistant autonomously plans a complete team dinner — from understanding your natural language request to finding real restaurants, checking calendar availability, and sending calendar invites. Watch it to see the assistant’s intelligence and seamless automation in action!
+
+---
+
+
 ## 🚀 Getting Started: Set Up Your AI Assistant!
 
 Follow these detailed steps to get your Proactive AI Assistant up and running on your local machine.
